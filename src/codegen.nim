@@ -70,7 +70,7 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
   jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 4, maxFloatRegs = 4)
 
   # Function Entry Prologue
-  let localSize = int32(jit.regAlloc.spillStackSize + 64) # extra stack buffer for C-ABI call spilling
+  let localSize = int32(jit.regAlloc.spillStackSize + 128) # extra stack buffer for recursive procedure return addresses
   let enterFlags = SLJIT_ENTER_FLOAT(4)
   discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS0V(), 4 or enterFlags, 4, localSize)
 
@@ -80,8 +80,12 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
       let lbl = sljit_emit_label(jit.compiler)
       jit.procLabels[inst.procName] = lbl
       discard sljit_emit_op_dst(jit.compiler, SLJIT_FAST_ENTER, SLJIT_S3, 0)
+      let procReturnSlot = jit.regAlloc.spillStackSize + 32
+      discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), procReturnSlot, SLJIT_S3, 0)
 
     of opProcExit:
+      let procReturnSlot = jit.regAlloc.spillStackSize + 32
+      discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_SP), procReturnSlot)
       discard sljit_emit_op_src(jit.compiler, SLJIT_FAST_RETURN, SLJIT_S3, 0)
 
     of opCall:
@@ -305,7 +309,7 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
 
   jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 4, maxFloatRegs = 4)
 
-  let localSize = int32(jit.regAlloc.spillStackSize + 64)
+  let localSize = int32(jit.regAlloc.spillStackSize + 128)
   let enterFlags = SLJIT_ENTER_FLOAT(4)
   discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS0V(), 4 or enterFlags, 4, localSize)
 
@@ -341,8 +345,12 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
       let lbl = sljit_emit_label(jit.compiler)
       jit.procLabels[inst.procName] = lbl
       discard sljit_emit_op_dst(jit.compiler, SLJIT_FAST_ENTER, SLJIT_S3, 0)
+      let procReturnSlot = jit.regAlloc.spillStackSize + 32
+      discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), procReturnSlot, SLJIT_S3, 0)
 
     of opProcExit:
+      let procReturnSlot = jit.regAlloc.spillStackSize + 32
+      discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_SP), procReturnSlot)
       discard sljit_emit_op_src(jit.compiler, SLJIT_FAST_RETURN, SLJIT_S3, 0)
 
     of opCall:

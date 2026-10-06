@@ -59,6 +59,7 @@ type
     nextLoopId*: int
     scopes*: seq[Table[string, VirtualReg]]
     procEntryPoints*: Table[string, int] # Proc name -> label index
+    procParamVRegs*: Table[string, seq[VirtualReg]]
 
 proc initIRBuilder*(): IRBuilder =
   IRBuilder(
@@ -67,7 +68,8 @@ proc initIRBuilder*(): IRBuilder =
     nextLabelId: 1,
     nextLoopId: 1,
     scopes: @[initTable[string, VirtualReg]()],
-    procEntryPoints: initTable[string, int]()
+    procEntryPoints: initTable[string, int](),
+    procParamVRegs: initTable[string, seq[VirtualReg]]()
   )
 
 proc enterScope*(ir: var IRBuilder) =
@@ -160,6 +162,13 @@ proc lowerExpr*(ir: var IRBuilder, node: AstNode): VirtualReg =
     var argVRegs: seq[VirtualReg] = @[]
     for arg in node.args:
       argVRegs.add(ir.lowerExpr(arg))
+
+    # Copy argument vregs to proc parameter vregs
+    if ir.procParamVRegs.hasKey(node.fnName):
+      let paramVRegs = ir.procParamVRegs[node.fnName]
+      for i in 0..<min(argVRegs.len, paramVRegs.len):
+        ir.emit(IRInstruction(op: opStoreVar, dst: paramVRegs[i], src1: argVRegs[i]))
+
     let dst = ir.newVReg(node.evalType)
     ir.emit(IRInstruction(op: opCall, dst: dst, procName: node.fnName, args: argVRegs))
     return dst
@@ -272,6 +281,8 @@ proc lowerStmt*(ir: var IRBuilder, node: AstNode) =
       let pvreg = ir.newVReg(p.paramType)
       ir.declareVar(p.name, pvreg)
       paramVRegs.add(pvreg)
+
+    ir.procParamVRegs[node.procName] = paramVRegs
 
     ir.lowerStmt(node.procBody)
     ir.exitScope()

@@ -34,7 +34,6 @@ proc updateReg(tbl: var Table[VRegId, LiveInterval], vreg: VirtualReg, idx: int)
 proc computeLiveIntervals*(instructions: seq[IRInstruction]): Table[VRegId, LiveInterval] =
   result = initTable[VRegId, LiveInterval]()
 
-  # Track label indices and loop back-edges
   var labelPos = initTable[int, int]()
   var loopBackEdges: seq[tuple[startInst: int, backInst: int]] = @[]
 
@@ -52,14 +51,12 @@ proc computeLiveIntervals*(instructions: seq[IRInstruction]): Table[VRegId, Live
     for arg in inst.args:
       result.updateReg(arg, idx)
 
-  # Extend live intervals for loop-carried variables
   for loop in loopBackEdges:
     for vregId, interval in result.mpairs:
-      # If variable is live at or before loop start and used/live inside loop, extend endInst to loop back-edge
       if interval.startInst <= loop.backInst and interval.endInst >= loop.startInst:
         interval.endInst = max(interval.endInst, loop.backInst)
 
-proc allocateRegisters*(instructions: seq[IRInstruction], maxIntRegs = 4, maxFloatRegs = 4): RegAllocResult =
+proc allocateRegisters*(instructions: seq[IRInstruction], maxIntRegs = 3, maxFloatRegs = 4): RegAllocResult =
   let intervalsTable = computeLiveIntervals(instructions)
   var intervals: seq[LiveInterval] = @[]
   for v, interval in intervalsTable:
@@ -69,10 +66,10 @@ proc allocateRegisters*(instructions: seq[IRInstruction], maxIntRegs = 4, maxFlo
 
   var locs = initTable[VRegId, RegLoc]()
 
-  # Saved registers (S0..S3) are preserved across C function calls (icall)
-  var availableInts = [SLJIT_S0, SLJIT_S1, SLJIT_S2, SLJIT_S3]
+  # S0..S2 reserved for variables, S3 reserved for SLJIT FAST_CALL return address
+  var availableInts = [SLJIT_S0, SLJIT_S1, SLJIT_S2]
   var intFreeRegs: seq[int32] = @[]
-  let numInts = min(maxIntRegs, 4)
+  let numInts = min(maxIntRegs, 3)
   for i in countdown(numInts - 1, 0):
     intFreeRegs.add(availableInts[i])
 
@@ -90,7 +87,6 @@ proc allocateRegisters*(instructions: seq[IRInstruction], maxIntRegs = 4, maxFlo
   for interval in intervals:
     let isFloat = (interval.dataType == dtFloat64)
 
-    # Expire old active intervals
     if isFloat:
       var newActive: seq[tuple[interval: LiveInterval, reg: int32]] = @[]
       for a in activeFloat:

@@ -1,7 +1,13 @@
 type
   NimStringHeader* {.packed.} = object
-    data*: ptr char
-    len*: int64
+    case isSmall*: bool
+    of true:
+      smallLen*: uint8
+      inlineChars*: array[14, char] # 14 bytes inline string data (1+1+14 = 16 bytes)
+    of false:
+      pad*: array[3, byte]
+      heapLen*: int32
+      data*: ptr UncheckedArray[char]
 
   VMValueKind* = enum
     vkInt,
@@ -17,58 +23,82 @@ type
     of vkString:
       strVal*: ptr NimStringHeader
 
+const ArenaSize = 8 * 1024 * 1024 # 8 MB contiguous memory pool
+
+type
+  MemoryArena* = object
+    buffer*: ptr UncheckedArray[char]
+    offset*: int
+    capacity*: int
+
+var globalArena*: MemoryArena
 var globalStringAllocations*: seq[pointer] = @[]
+
+proc initGlobalArena*() =
+  if globalArena.buffer == nil:
+    globalArena.capacity = ArenaSize
+    globalArena.buffer = cast[ptr UncheckedArray[char]](alloc0(ArenaSize))
+    globalArena.offset = 0
+
+proc arenaAlloc*(size: int): ptr UncheckedArray[char] =
+  if globalArena.buffer == nil:
+    initGlobalArena()
+  let alignedSize = (size + 7) and not 7 # 8-byte alignment
+  if globalArena.offset + alignedSize > globalArena.capacity:
+    let p = alloc0(alignedSize)
+    globalStringAllocations.add(p)
+    return cast[ptr UncheckedArray[char]](p)
+  result = cast[ptr UncheckedArray[char]](addr globalArena.buffer[globalArena.offset])
+  globalArena.offset += alignedSize
 
 proc trackAlloc*(p: pointer) =
   if p != nil:
     globalStringAllocations.add(p)
 
 proc nim_arena_reset*() {.cdecl, exportc.} =
+  globalArena.offset = 0
   for p in globalStringAllocations:
     if p != nil:
       dealloc(p)
   globalStringAllocations.setLen(0)
 
 proc createNimString*(s: string): NimStringHeader =
-  if s.len == 0:
-    return NimStringHeader(data: nil, len: 0)
-  let p = cast[ptr char](alloc0(s.len + 1))
-  trackAlloc(p)
-  copyMem(p, cstring(s), s.len)
-  result = NimStringHeader(data: p, len: s.len)
+  if s.len <= 14:
+    result = NimStringHeader(isSmall: true, smallLen: uint8(s.len))
+    if s.len > 0:
+      copyMem(addr result.inlineChars[0], cstring(s), s.len)
+  else:
+    let buf = arenaAlloc(s.len + 1)
+    copyMem(buf, cstring(s), s.len)
+    result = NimStringHeader(isSmall: false, heapLen: int32(s.len), data: buf)
 
 proc nimStringToString*(s: NimStringHeader): string =
-  if s.len <= 0 or s.data == nil:
-    return ""
-  result = newString(s.len)
-  copyMem(addr result[0], s.data, s.len)
+  if s.isSmall:
+    let l = int(s.smallLen)
+    if l <= 0: return ""
+    result = newString(l)
+    copyMem(addr result[0], unsafeAddr s.inlineChars[0], l)
+  else:
+    let l = int(s.heapLen)
+    if l <= 0 or s.data == nil: return ""
+    result = newString(l)
+    copyMem(addr result[0], s.data, l)
 
 # Helper functions for SLJIT JIT / C calling convention ({.cdecl.})
 proc nim_str_concat*(s1: ptr NimStringHeader, s2: ptr NimStringHeader): ptr NimStringHeader {.cdecl, exportc.} =
-  let resHeader = cast[ptr NimStringHeader](alloc0(sizeof(NimStringHeader)))
-  trackAlloc(resHeader)
+  let resHeader = cast[ptr NimStringHeader](arenaAlloc(sizeof(NimStringHeader)))
 
-  let len1 = if s1 != nil: s1.len else: 0
-  let len2 = if s2 != nil: s2.len else: 0
-  let totalLen = len1 + len2
-  resHeader.len = totalLen
+  var str1 = ""
+  var str2 = ""
+  if s1 != nil: str1 = nimStringToString(s1[])
+  if s2 != nil: str2 = nimStringToString(s2[])
 
-  if totalLen > 0:
-    let buf = cast[ptr char](alloc0(totalLen + 1))
-    trackAlloc(buf)
-    if len1 > 0 and s1.data != nil:
-      copyMem(buf, s1.data, len1)
-    if len2 > 0 and s2.data != nil:
-      let dst = cast[ptr char](cast[uint](buf) + cast[uint](len1))
-      copyMem(dst, s2.data, len2)
-    resHeader.data = buf
-  else:
-    resHeader.data = nil
-
+  let combined = str1 & str2
+  resHeader[] = createNimString(combined)
   return resHeader
 
 proc nim_str_print*(s: ptr NimStringHeader) {.cdecl, exportc.} =
-  if s != nil and s.len > 0 and s.data != nil:
+  if s != nil:
     let str = nimStringToString(s[])
     echo str
   else:
@@ -83,8 +113,7 @@ proc nim_float_print*(val: float64) {.cdecl, exportc.} =
 proc nim_str_eq*(s1: ptr NimStringHeader, s2: ptr NimStringHeader): int64 {.cdecl, exportc.} =
   if s1 == s2: return 1
   if s1 == nil or s2 == nil: return 0
-  if s1.len != s2.len: return 0
-  if s1.len == 0: return 1
-  if cmpMem(s1.data, s2.data, s1.len) == 0:
-    return 1
+  let str1 = nimStringToString(s1[])
+  let str2 = nimStringToString(s2[])
+  if str1 == str2: return 1
   return 0
