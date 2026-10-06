@@ -33,12 +33,31 @@ proc updateReg(tbl: var Table[VRegId, LiveInterval], vreg: VirtualReg, idx: int)
 
 proc computeLiveIntervals*(instructions: seq[IRInstruction]): Table[VRegId, LiveInterval] =
   result = initTable[VRegId, LiveInterval]()
+
+  # Track label indices and loop back-edges
+  var labelPos = initTable[int, int]()
+  var loopBackEdges: seq[tuple[startInst: int, backInst: int]] = @[]
+
   for idx, inst in instructions:
+    if inst.op == opLabel:
+      labelPos[inst.labelIdx] = idx
+    elif inst.op == opJumpBack:
+      if labelPos.hasKey(inst.labelIdx):
+        let startIdx = labelPos[inst.labelIdx]
+        loopBackEdges.add((startInst: startIdx, backInst: idx))
+
     result.updateReg(inst.dst, idx)
     result.updateReg(inst.src1, idx)
     result.updateReg(inst.src2, idx)
     for arg in inst.args:
       result.updateReg(arg, idx)
+
+  # Extend live intervals for loop-carried variables
+  for loop in loopBackEdges:
+    for vregId, interval in result.mpairs:
+      # If variable is live at or before loop start and used/live inside loop, extend endInst to loop back-edge
+      if interval.startInst <= loop.backInst and interval.endInst >= loop.startInst:
+        interval.endInst = max(interval.endInst, loop.backInst)
 
 proc allocateRegisters*(instructions: seq[IRInstruction], maxIntRegs = 4, maxFloatRegs = 4): RegAllocResult =
   let intervalsTable = computeLiveIntervals(instructions)

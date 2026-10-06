@@ -32,7 +32,9 @@ type
     opLabel,
     opPrint,
     opCall,
-    opReturn
+    opReturn,
+    opProcEntry,
+    opProcExit
 
   IRInstruction* = object
     op*: IROpcode
@@ -46,6 +48,7 @@ type
     varName*: string
     labelIdx*: int
     loopId*: int
+    procName*: string
     args*: seq[VirtualReg]
     printType*: DataType
 
@@ -54,7 +57,8 @@ type
     nextVRegId*: int
     nextLabelId*: int
     nextLoopId*: int
-    varToVReg*: Table[string, VirtualReg]
+    scopes*: seq[Table[string, VirtualReg]]
+    procEntryPoints*: Table[string, int] # Proc name -> label index
 
 proc initIRBuilder*(): IRBuilder =
   IRBuilder(
@@ -62,8 +66,26 @@ proc initIRBuilder*(): IRBuilder =
     nextVRegId: 1,
     nextLabelId: 1,
     nextLoopId: 1,
-    varToVReg: initTable[string, VirtualReg]()
+    scopes: @[initTable[string, VirtualReg]()],
+    procEntryPoints: initTable[string, int]()
   )
+
+proc enterScope*(ir: var IRBuilder) =
+  ir.scopes.add(initTable[string, VirtualReg]())
+
+proc exitScope*(ir: var IRBuilder) =
+  if ir.scopes.len > 1:
+    discard ir.scopes.pop()
+
+proc declareVar*(ir: var IRBuilder, name: string, vreg: VirtualReg) =
+  let lastIdx = ir.scopes.len - 1
+  ir.scopes[lastIdx][name] = vreg
+
+proc lookupVar*(ir: IRBuilder, name: string): tuple[found: bool, vreg: VirtualReg] =
+  for i in countdown(ir.scopes.len - 1, 0):
+    if ir.scopes[i].hasKey(name):
+      return (true, ir.scopes[i][name])
+  return (false, VirtualReg())
 
 proc newVReg*(ir: var IRBuilder, dt: DataType): VirtualReg =
   result = VirtualReg(id: ir.nextVRegId, dataType: dt)
@@ -101,11 +123,12 @@ proc lowerExpr*(ir: var IRBuilder, node: AstNode): VirtualReg =
     return dst
 
   of nkVarRef:
-    if ir.varToVReg.hasKey(node.varName):
-      return ir.varToVReg[node.varName]
+    let (found, vreg) = ir.lookupVar(node.varName)
+    if found:
+      return vreg
     else:
       let dst = ir.newVReg(node.evalType)
-      ir.varToVReg[node.varName] = dst
+      ir.declareVar(node.varName, dst)
       ir.emit(IRInstruction(op: opLoadVar, dst: dst, varName: node.varName))
       return dst
 
@@ -138,7 +161,7 @@ proc lowerExpr*(ir: var IRBuilder, node: AstNode): VirtualReg =
     for arg in node.args:
       argVRegs.add(ir.lowerExpr(arg))
     let dst = ir.newVReg(node.evalType)
-    ir.emit(IRInstruction(op: opCall, dst: dst, varName: node.fnName, args: argVRegs))
+    ir.emit(IRInstruction(op: opCall, dst: dst, procName: node.fnName, args: argVRegs))
     return dst
 
   else:
@@ -150,19 +173,20 @@ proc lowerStmt*(ir: var IRBuilder, node: AstNode) =
   case node.kind
   of nkVarDecl:
     let vreg = ir.newVReg(node.declaredType)
-    ir.varToVReg[node.declName] = vreg
+    ir.declareVar(node.declName, vreg)
     if node.initExpr != nil:
       let initVReg = ir.lowerExpr(node.initExpr)
       ir.emit(IRInstruction(op: opStoreVar, dst: vreg, src1: initVReg, varName: node.declName))
 
   of nkAssign:
     let valVReg = ir.lowerExpr(node.valExpr)
+    let (found, existingVReg) = ir.lookupVar(node.targetName)
     var targetVReg: VirtualReg
-    if ir.varToVReg.hasKey(node.targetName):
-      targetVReg = ir.varToVReg[node.targetName]
+    if found:
+      targetVReg = existingVReg
     else:
       targetVReg = ir.newVReg(node.valExpr.evalType)
-      ir.varToVReg[node.targetName] = targetVReg
+      ir.declareVar(node.targetName, targetVReg)
     ir.emit(IRInstruction(op: opStoreVar, dst: targetVReg, src1: valVReg, varName: node.targetName))
 
   of nkIf:
@@ -171,12 +195,16 @@ proc lowerStmt*(ir: var IRBuilder, node: AstNode) =
     let endLabel = ir.newLabel()
 
     ir.emit(IRInstruction(op: opJumpIfZero, src1: condVReg, labelIdx: elseLabel))
+    ir.enterScope()
     ir.lowerStmt(node.thenBlock)
+    ir.exitScope()
     ir.emit(IRInstruction(op: opJump, labelIdx: endLabel))
 
     ir.emit(IRInstruction(op: opLabel, labelIdx: elseLabel))
     if node.elseBlock != nil:
+      ir.enterScope()
       ir.lowerStmt(node.elseBlock)
+      ir.exitScope()
 
     ir.emit(IRInstruction(op: opLabel, labelIdx: endLabel))
 
@@ -189,7 +217,9 @@ proc lowerStmt*(ir: var IRBuilder, node: AstNode) =
     let condVReg = ir.lowerExpr(node.whileCond)
     ir.emit(IRInstruction(op: opJumpIfZero, src1: condVReg, labelIdx: endLabel))
 
+    ir.enterScope()
     ir.lowerStmt(node.whileBody)
+    ir.exitScope()
     ir.emit(IRInstruction(op: opJumpBack, labelIdx: startLabel, loopId: loopId))
 
     ir.emit(IRInstruction(op: opLabel, labelIdx: endLabel))
@@ -199,8 +229,9 @@ proc lowerStmt*(ir: var IRBuilder, node: AstNode) =
     let startLabel = ir.newLabel()
     let endLabel = ir.newLabel()
 
+    ir.enterScope()
     let iterVReg = ir.newVReg(dtInt64)
-    ir.varToVReg[node.forVar] = iterVReg
+    ir.declareVar(node.forVar, iterVReg)
 
     let startVReg = ir.lowerExpr(node.forStart)
     let endVReg = ir.lowerExpr(node.forEnd)
@@ -209,24 +240,50 @@ proc lowerStmt*(ir: var IRBuilder, node: AstNode) =
 
     ir.emit(IRInstruction(op: opLabel, labelIdx: startLabel))
 
-    # Condition: iterVReg <= endVReg
     let condVReg = ir.newVReg(dtInt64)
     ir.emit(IRInstruction(op: opCmpLe, dst: condVReg, src1: iterVReg, src2: endVReg))
     ir.emit(IRInstruction(op: opJumpIfZero, src1: condVReg, labelIdx: endLabel))
 
     ir.lowerStmt(node.forBody)
 
-    # Increment iterVReg by 1
     let oneVReg = ir.newVReg(dtInt64)
     ir.emit(IRInstruction(op: opLoadIntConst, dst: oneVReg, intImm: 1))
     ir.emit(IRInstruction(op: opAdd, dst: iterVReg, src1: iterVReg, src2: oneVReg))
 
     ir.emit(IRInstruction(op: opJumpBack, labelIdx: startLabel, loopId: loopId))
     ir.emit(IRInstruction(op: opLabel, labelIdx: endLabel))
+    ir.exitScope()
+
+  of nkProcDecl:
+    let entryLabel = ir.newLabel()
+    let skipLabel = ir.newLabel()
+
+    ir.procEntryPoints[node.procName] = entryLabel
+
+    # Skip procedure body during top-level linear execution flow
+    ir.emit(IRInstruction(op: opJump, labelIdx: skipLabel))
+
+    ir.emit(IRInstruction(op: opLabel, labelIdx: entryLabel))
+    ir.emit(IRInstruction(op: opProcEntry, procName: node.procName))
+
+    ir.enterScope()
+    var paramVRegs: seq[VirtualReg] = @[]
+    for p in node.procParams:
+      let pvreg = ir.newVReg(p.paramType)
+      ir.declareVar(p.name, pvreg)
+      paramVRegs.add(pvreg)
+
+    ir.lowerStmt(node.procBody)
+    ir.exitScope()
+
+    ir.emit(IRInstruction(op: opProcExit, procName: node.procName))
+    ir.emit(IRInstruction(op: opLabel, labelIdx: skipLabel))
 
   of nkBlock:
+    ir.enterScope()
     for stmt in node.stmts:
       ir.lowerStmt(stmt)
+    ir.exitScope()
 
   of nkPrint:
     let valVReg = ir.lowerExpr(node.expr)

@@ -61,6 +61,9 @@ const
   SLJIT_DIV_UW* = int32(6)
   SLJIT_DIV_SW* = int32(7)
 
+  SLJIT_FAST_RETURN* = int32(112)
+  SLJIT_FAST_ENTER* = int32(118)
+
   SLJIT_MOV* = int32(32)
   SLJIT_MOV_U8* = int32(33)
   SLJIT_MOV_S8* = int32(34)
@@ -185,5 +188,8 @@ proc sljit_set_label*(jump: SljitJump, label: SljitLabel) {.importc: "sljit_set_
 proc sljit_emit_call*(compiler: SljitCompiler, typeVal: int32, arg_types: int32): SljitJump {.importc: "sljit_emit_call", header: "sljitLir.h".}
 proc sljit_emit_ijump*(compiler: SljitCompiler, typeVal: int32, src: int32, srcw: int): int32 {.importc: "sljit_emit_ijump", header: "sljitLir.h".}
 proc sljit_emit_icall*(compiler: SljitCompiler, typeVal: int32, arg_types: int32, src: int32, srcw: int): int32 {.importc: "sljit_emit_icall", header: "sljitLir.h".}
+
+proc sljit_emit_op_dst*(compiler: SljitCompiler, op: int32, dst: int32, dstw: int): int32 {.importc: "sljit_emit_op_dst", header: "sljitLir.h".}
+proc sljit_emit_op_src*(compiler: SljitCompiler, op: int32, src: int32, srcw: int): int32 {.importc: "sljit_emit_op_src", header: "sljitLir.h".}
 
 proc sljit_get_local_base*(compiler: SljitCompiler, dst: int32, dstw: int, offset: int): int32 {.importc: "sljit_get_local_base", header: "sljitLir.h".}

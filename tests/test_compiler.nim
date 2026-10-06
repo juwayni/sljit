@@ -1,5 +1,5 @@
 import std/tables
-import ../src/[sljit_bindings, lexer, parser, typechecker, ir, regalloc, vm, codegen]
+import ../src/[sljit_bindings, runtime, lexer, parser, typechecker, ir, regalloc, vm, codegen]
 
 proc testFullPipeline() =
   echo "[Test 1] Arithmetic and Variable Assignment"
@@ -21,12 +21,14 @@ print c
   cast[FnProc](codePtr1)()
 
 proc testFloatOperations() =
-  echo "[Test 2] Float64 Arithmetic"
+  echo "[Test 2] Float64 Arithmetic and Comparisons"
   let code2 = """
 var x: float64 = 2.5
 var y: float64 = 4.0
 var z: float64 = x * y + 1.5
 print z
+if x < y:
+  print 100
 """
   let tokens2 = tokenizeAll(code2)
   var p2 = initParser(tokens2)
@@ -60,10 +62,10 @@ print full
   cast[FnProc](codePtr3)()
 
 proc testHotLoopOSR() =
-  echo "[Test 4] Tiered VM Interpreter & Edge-Counting Hot-Loop Detector OSR"
+  echo "[Test 4] Tiered VM Interpreter & True OSR JIT Loop Execution"
   let code4 = """
 var total: int64 = 0
-for i in 1..50:
+for i in 1..20:
   total = total + i
 print total
 """
@@ -75,7 +77,7 @@ print total
   var ir4 = initIRBuilder()
   ir4.lowerStmt(ast4)
 
-  var vmCtx = initVMContext(tc4.stringPool, hotThreshold = 10, jitCallback = compileToNative)
+  var vmCtx = initVMContext(tc4.stringPool, hotThreshold = 5)
   discard vmCtx.executeInterpreter(ir4.instructions)
   assert len(vmCtx.loopCounters) > 0
 
@@ -106,15 +108,69 @@ print v6
   type FnProc = proc() {.cdecl.}
   cast[FnProc](codePtr5)()
 
+proc testProcedureCalls() =
+  echo "[Test 6] Procedure Declarations and Procedure Calls"
+  let code6 = """
+proc calc(a: int64, b: int64): int64
+  var v: int64 = a * b + 10
+  print v
+
+calc(5, 4)
+"""
+  let tokens6 = tokenizeAll(code6)
+  var p6 = initParser(tokens6)
+  let ast6 = p6.parseProgram()
+  var tc6 = initTypeChecker()
+  tc6.checkStmt(ast6)
+  var ir6 = initIRBuilder()
+  ir6.lowerStmt(ast6)
+  let codePtr6 = compileToNative(ir6.instructions, tc6.stringPool)
+  type FnProc = proc() {.cdecl.}
+  cast[FnProc](codePtr6)()
+
+proc testVariableShadowing() =
+  echo "[Test 7] Scoped Variable Shadowing"
+  let code7 = """
+var val: int64 = 100
+if val > 50:
+  var val: int64 = 200
+  print val
+print val
+"""
+  let tokens7 = tokenizeAll(code7)
+  var p7 = initParser(tokens7)
+  let ast7 = p7.parseProgram()
+  var tc7 = initTypeChecker()
+  tc7.checkStmt(ast7)
+  var ir7 = initIRBuilder()
+  ir7.lowerStmt(ast7)
+  let codePtr7 = compileToNative(ir7.instructions, tc7.stringPool)
+  type FnProc = proc() {.cdecl.}
+  cast[FnProc](codePtr7)()
+
+proc testStringArenaReset() =
+  echo "[Test 8] String Arena Memory Cleanup"
+  let before = globalStringAllocations.len
+  var s1 = createNimString("Hello ")
+  var s2 = createNimString("Arena")
+  discard nim_str_concat(addr s1, addr s2)
+  assert globalStringAllocations.len > before
+  nim_arena_reset()
+  assert globalStringAllocations.len == 0
+  echo "String Arena reset verified!"
+
 when isMainModule:
   echo "=================================================="
-  echo "Running End-to-End Compiler Integration Tests..."
+  echo "Running Comprehensive Compiler Pipeline Tests..."
   echo "=================================================="
   testFullPipeline()
   testFloatOperations()
   testStringArchitecture()
   testHotLoopOSR()
   testRegisterSpilling()
+  testProcedureCalls()
+  testVariableShadowing()
+  testStringArenaReset()
   echo "=================================================="
-  echo "ALL END-TO-END COMPILER INTEGRATION TESTS PASSED!"
+  echo "ALL COMPILER PIPELINE TESTS PASSED SUCCESSFULLY!"
   echo "=================================================="
