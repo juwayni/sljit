@@ -9,19 +9,10 @@ type
       heapLen*: int32
       data*: ptr UncheckedArray[char]
 
-  VMValueKind* = enum
-    vkInt,
-    vkFloat,
-    vkString
-
-  VMValue* = object
-    case kind*: VMValueKind
-    of vkInt:
-      intVal*: int64
-    of vkFloat:
-      floatVal*: float64
-    of vkString:
-      strVal*: ptr NimStringHeader
+  VMValue* {.union.} = object
+    asInt*: int64
+    asFloat*: float64
+    asPtr*: pointer
 
 const ArenaSize = 8 * 1024 * 1024 # 8 MB contiguous memory pool
 

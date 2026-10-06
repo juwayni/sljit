@@ -7,10 +7,11 @@ type
   CallFrame* = object
     returnPc*: int
     returnDstVReg*: VirtualReg
-    registers*: Table[VRegId, VMValue]
+    registers*: ptr UncheckedArray[VMValue]
 
   VMContext* = object
-    registers*: Table[VRegId, VMValue]
+    registers*: ptr UncheckedArray[VMValue]
+    maxRegs*: int
     callStack*: seq[CallFrame]
     stringPool*: seq[string]
     loopCounters*: Table[int, int]
@@ -19,9 +20,11 @@ type
     jitCompiledCode*: Table[int, pointer] # loopId -> native code ptr
     procEntryPoints*: Table[string, int] # Proc name -> IR instruction index
 
-proc initVMContext*(stringPool: seq[string], hotThreshold = 10, jitCallback: JitCompilerCallback = nil): VMContext =
+proc initVMContext*(stringPool: seq[string], hotThreshold = 10, jitCallback: JitCompilerCallback = nil, maxRegs = 1024): VMContext =
+  let regBuf = cast[ptr UncheckedArray[VMValue]](alloc0(sizeof(VMValue) * maxRegs))
   VMContext(
-    registers: initTable[VRegId, VMValue](),
+    registers: regBuf,
+    maxRegs: maxRegs,
     callStack: @[],
     stringPool: stringPool,
     loopCounters: initTable[int, int](),
@@ -30,21 +33,6 @@ proc initVMContext*(stringPool: seq[string], hotThreshold = 10, jitCallback: Jit
     jitCompiledCode: initTable[int, pointer](),
     procEntryPoints: initTable[string, int]()
   )
-
-proc getInt*(vm: VMContext, vreg: VirtualReg): int64 =
-  if vreg.id in vm.registers:
-    return vm.registers[vreg.id].intVal
-  return 0
-
-proc getFloat*(vm: VMContext, vreg: VirtualReg): float64 =
-  if vreg.id in vm.registers:
-    return vm.registers[vreg.id].floatVal
-  return 0.0
-
-proc getString*(vm: VMContext, vreg: VirtualReg): ptr NimStringHeader =
-  if vreg.id in vm.registers:
-    return vm.registers[vreg.id].strVal
-  return nil
 
 proc findLabelPos*(instructions: seq[IRInstruction], labelIdx: int): int =
   for idx, inst in instructions:
@@ -67,6 +55,11 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
   while pc < instructions.len:
     let inst = instructions[pc]
 
+    let dst = inst.dst.id
+    let s1 = inst.src1.id
+    let s2 = inst.src2.id
+
+    {.computedGoto.}
     case inst.op
     of opProcEntry:
       discard
@@ -94,7 +87,7 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
         raise newException(ValueError, "VM Error: Procedure '" & inst.procName & "' not found.")
 
     of opReturn:
-      let retVal = vm.registers.getOrDefault(inst.src1.id, VMValue(kind: vkInt, intVal: 0))
+      let retVal = vm.registers[s1]
       if vm.callStack.len > 0:
         let frame = vm.callStack.pop()
         pc = frame.returnPc
@@ -104,102 +97,94 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
         inc pc
         continue
       else:
-        return retVal.intVal
+        return retVal.asInt
 
     of opLoadIntConst:
-      vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: inst.intImm)
+      vm.registers[dst].asInt = inst.intImm
 
     of opLoadFloatConst:
-      vm.registers[inst.dst.id] = VMValue(kind: vkFloat, floatVal: inst.floatImm)
+      vm.registers[dst].asFloat = inst.floatImm
 
     of opLoadStrConst:
       let sHeaderPtr = addr strHeaders[inst.strIndex]
-      vm.registers[inst.dst.id] = VMValue(kind: vkString, strVal: sHeaderPtr)
+      vm.registers[dst].asPtr = cast[pointer](sHeaderPtr)
 
     of opLoadVar, opStoreVar:
-      if inst.src1.id > 0 and vm.registers.hasKey(inst.src1.id):
-        vm.registers[inst.dst.id] = vm.registers[inst.src1.id]
+      if s1 > 0:
+        vm.registers[dst] = vm.registers[s1]
 
     of opAdd:
       if inst.dst.dataType == dtFloat64:
-        let res = vm.getFloat(inst.src1) + vm.getFloat(inst.src2)
-        vm.registers[inst.dst.id] = VMValue(kind: vkFloat, floatVal: res)
+        vm.registers[dst].asFloat = vm.registers[s1].asFloat + vm.registers[s2].asFloat
       else:
-        let res = vm.getInt(inst.src1) + vm.getInt(inst.src2)
-        vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: res)
+        vm.registers[dst].asInt = vm.registers[s1].asInt + vm.registers[s2].asInt
 
     of opSub:
       if inst.dst.dataType == dtFloat64:
-        let res = vm.getFloat(inst.src1) - vm.getFloat(inst.src2)
-        vm.registers[inst.dst.id] = VMValue(kind: vkFloat, floatVal: res)
+        vm.registers[dst].asFloat = vm.registers[s1].asFloat - vm.registers[s2].asFloat
       else:
-        let res = vm.getInt(inst.src1) - vm.getInt(inst.src2)
-        vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: res)
+        vm.registers[dst].asInt = vm.registers[s1].asInt - vm.registers[s2].asInt
 
     of opMul:
       if inst.dst.dataType == dtFloat64:
-        let res = vm.getFloat(inst.src1) * vm.getFloat(inst.src2)
-        vm.registers[inst.dst.id] = VMValue(kind: vkFloat, floatVal: res)
+        vm.registers[dst].asFloat = vm.registers[s1].asFloat * vm.registers[s2].asFloat
       else:
-        let res = vm.getInt(inst.src1) * vm.getInt(inst.src2)
-        vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: res)
+        vm.registers[dst].asInt = vm.registers[s1].asInt * vm.registers[s2].asInt
 
     of opDiv:
       if inst.dst.dataType == dtFloat64:
-        let res = vm.getFloat(inst.src1) / vm.getFloat(inst.src2)
-        vm.registers[inst.dst.id] = VMValue(kind: vkFloat, floatVal: res)
+        vm.registers[dst].asFloat = vm.registers[s1].asFloat / vm.registers[s2].asFloat
       else:
-        let r2 = vm.getInt(inst.src2)
-        let res = if r2 != 0: vm.getInt(inst.src1) div r2 else: 0
-        vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: res)
+        let divVal = vm.registers[s2].asInt
+        vm.registers[dst].asInt = if divVal != 0: vm.registers[s1].asInt div divVal else: 0
 
     of opConcatStr:
-      let s1 = vm.getString(inst.src1)
-      let s2 = vm.getString(inst.src2)
-      let resHeaderPtr = nim_str_concat(s1, s2)
-      vm.registers[inst.dst.id] = VMValue(kind: vkString, strVal: resHeaderPtr)
+      let str1Ptr = cast[ptr NimStringHeader](vm.registers[s1].asPtr)
+      let str2Ptr = cast[ptr NimStringHeader](vm.registers[s2].asPtr)
+      let resHeaderPtr = nim_str_concat(str1Ptr, str2Ptr)
+      vm.registers[dst].asPtr = cast[pointer](resHeaderPtr)
 
     of opCmpEq:
       let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
-      let cond = if isFloat: (vm.getFloat(inst.src1) == vm.getFloat(inst.src2)) else: (vm.getInt(inst.src1) == vm.getInt(inst.src2))
-      vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: if cond: 1'i64 else: 0'i64)
+      let cond = if isFloat: (vm.registers[s1].asFloat == vm.registers[s2].asFloat) else: (vm.registers[s1].asInt == vm.registers[s2].asInt)
+      vm.registers[dst].asInt = if cond: 1'i64 else: 0'i64
 
     of opCmpNeq:
       let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
-      let cond = if isFloat: (vm.getFloat(inst.src1) != vm.getFloat(inst.src2)) else: (vm.getInt(inst.src1) != vm.getInt(inst.src2))
-      vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: if cond: 1'i64 else: 0'i64)
+      let cond = if isFloat: (vm.registers[s1].asFloat != vm.registers[s2].asFloat) else: (vm.registers[s1].asInt != vm.registers[s2].asInt)
+      vm.registers[dst].asInt = if cond: 1'i64 else: 0'i64
 
     of opCmpLt:
       let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
-      let cond = if isFloat: (vm.getFloat(inst.src1) < vm.getFloat(inst.src2)) else: (vm.getInt(inst.src1) < vm.getInt(inst.src2))
-      vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: if cond: 1'i64 else: 0'i64)
+      let cond = if isFloat: (vm.registers[s1].asFloat < vm.registers[s2].asFloat) else: (vm.registers[s1].asInt < vm.registers[s2].asInt)
+      vm.registers[dst].asInt = if cond: 1'i64 else: 0'i64
 
     of opCmpLe:
       let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
-      let cond = if isFloat: (vm.getFloat(inst.src1) <= vm.getFloat(inst.src2)) else: (vm.getInt(inst.src1) <= vm.getInt(inst.src2))
-      vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: if cond: 1'i64 else: 0'i64)
+      let cond = if isFloat: (vm.registers[s1].asFloat <= vm.registers[s2].asFloat) else: (vm.registers[s1].asInt <= vm.registers[s2].asInt)
+      vm.registers[dst].asInt = if cond: 1'i64 else: 0'i64
 
     of opCmpGt:
       let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
-      let cond = if isFloat: (vm.getFloat(inst.src1) > vm.getFloat(inst.src2)) else: (vm.getInt(inst.src1) > vm.getInt(inst.src2))
-      vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: if cond: 1'i64 else: 0'i64)
+      let cond = if isFloat: (vm.registers[s1].asFloat > vm.registers[s2].asFloat) else: (vm.registers[s1].asInt > vm.registers[s2].asInt)
+      vm.registers[dst].asInt = if cond: 1'i64 else: 0'i64
 
     of opCmpGe:
       let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
-      let cond = if isFloat: (vm.getFloat(inst.src1) >= vm.getFloat(inst.src2)) else: (vm.getInt(inst.src1) >= vm.getInt(inst.src2))
-      vm.registers[inst.dst.id] = VMValue(kind: vkInt, intVal: if cond: 1'i64 else: 0'i64)
+      let cond = if isFloat: (vm.registers[s1].asFloat >= vm.registers[s2].asFloat) else: (vm.registers[s1].asInt >= vm.registers[s2].asInt)
+      vm.registers[dst].asInt = if cond: 1'i64 else: 0'i64
 
     of opJump:
       pc = findLabelPos(instructions, inst.labelIdx)
       continue
 
     of opJumpIfZero:
-      if vm.getInt(inst.src1) == 0:
+      if vm.registers[s1].asInt == 0:
         pc = findLabelPos(instructions, inst.labelIdx)
         continue
 
     of opJumpIfNotZero:
-      if vm.getInt(inst.src1) != 0:
+      if vm.registers[s1].asInt != 0:
         pc = findLabelPos(instructions, inst.labelIdx)
         continue
 
@@ -211,7 +196,7 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
       if currentCount >= vm.hotThreshold:
         if not vm.jitCompiledCode.hasKey(loopId):
           echo "[VM Tier 4 Hot Loop Detector] Loop #", loopId, " reached threshold (", currentCount, " iterations). Triggering True OSR JIT Compilation!"
-          let codePtr = compileOSRToNative(instructions, vm.stringPool, loopId, vm.registers)
+          let codePtr = compileOSRToNative(instructions, vm.stringPool, loopId, vm.registers, vm.maxRegs)
           vm.jitCompiledCode[loopId] = codePtr
 
         if vm.jitCompiledCode[loopId] != nil:
@@ -230,11 +215,11 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
     of opPrint:
       case inst.printType
       of dtInt64:
-        nim_int_print(vm.getInt(inst.src1))
+        nim_int_print(vm.registers[s1].asInt)
       of dtFloat64:
-        nim_float_print(vm.getFloat(inst.src1))
+        nim_float_print(vm.registers[s1].asFloat)
       of dtString:
-        nim_str_print(vm.getString(inst.src1))
+        nim_str_print(cast[ptr NimStringHeader](vm.registers[s1].asPtr))
       else:
         discard
 

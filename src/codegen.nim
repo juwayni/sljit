@@ -70,7 +70,7 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
   jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 4, maxFloatRegs = 4)
 
   # Function Entry Prologue
-  let localSize = int32(jit.regAlloc.spillStackSize + 128) # extra stack buffer for recursive procedure return addresses
+  let localSize = int32(jit.regAlloc.spillStackSize + 128) # extra stack buffer for C-ABI call spilling
   let enterFlags = SLJIT_ENTER_FLOAT(4)
   discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS0V(), 4 or enterFlags, 4, localSize)
 
@@ -280,10 +280,8 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
         discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_RETURN_REG, 0, retReg, 0)
       discard sljit_emit_return(jit.compiler, SLJIT_MOV, SLJIT_RETURN_REG, 0)
 
-  # Default Return
   discard sljit_emit_return_void(jit.compiler)
 
-  # Resolve Jump Targets to Labels
   for item in jit.jumpsToResolve:
     if jit.labels.hasKey(item.targetLabelIdx):
       sljit_set_label(item.jump, jit.labels[item.targetLabelIdx])
@@ -295,7 +293,7 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
   result = sljit_generate_code(jit.compiler, 0, nil)
   sljit_free_compiler(jit.compiler)
 
-proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[string], targetLoopId: int, liveRegisters: Table[int, VMValue]): pointer =
+proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[string], targetLoopId: int, vmRegisters: ptr UncheckedArray[VMValue], maxRegs = 1024): pointer =
   var jit = initJitCompiler()
   jit.compiler = sljit_create_compiler(nil)
   if jit.compiler == nil:
@@ -313,19 +311,13 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
   let enterFlags = SLJIT_ENTER_FLOAT(4)
   discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS0V(), 4 or enterFlags, 4, localSize)
 
-  # Populate OSR JIT stack frame with active live VM values
-  for vregId, vmVal in liveRegisters:
-    if vregId > 0:
-      let vreg = VirtualReg(id: vregId, dataType: (if vmVal.kind == vkFloat: dtFloat64 elif vmVal.kind == vkString: dtString else: dtInt64))
-      case vmVal.kind
-      of vkInt:
-        discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, vmVal.intVal)
-        jit.writeBack(vreg, SLJIT_R0)
-      of vkFloat:
-        discard sljit_emit_fset64(jit.compiler, SLJIT_FR0, vmVal.floatVal)
-        jit.writeBack(vreg, SLJIT_FR0)
-      of vkString:
-        discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, cast[int](vmVal.strVal))
+  # Populate OSR JIT stack frame with active live VM values from flat registers array
+  if vmRegisters != nil:
+    for vregId in 1..<maxRegs:
+      if jit.regAlloc.locations.hasKey(vregId):
+        let vval = vmRegisters[vregId]
+        let vreg = VirtualReg(id: vregId, dataType: dtInt64)
+        discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, vval.asInt)
         jit.writeBack(vreg, SLJIT_R0)
 
   # Find OSR target label for targetLoopId
