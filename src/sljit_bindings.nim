@@ -14,30 +14,36 @@ type
   SljitJumpObj {.importc: "struct sljit_jump", header: "sljitLir.h".} = object
   SljitJump* = ptr SljitJumpObj
 
-# Register Constants
-const
-  SLJIT_R0* = int32(1)
-  SLJIT_R1* = int32(2)
-  SLJIT_R2* = int32(3)
-  SLJIT_R3* = int32(4)
-  SLJIT_R4* = int32(5)
-  SLJIT_R5* = int32(6)
-  SLJIT_R6* = int32(7)
-  SLJIT_R7* = int32(8)
+# Register Constants (C macro wrappers via importc header sljitLir.h)
+var
+  SLJIT_R0* {.importc: "SLJIT_R0", header: "sljitLir.h".}: int32
+  SLJIT_R1* {.importc: "SLJIT_R1", header: "sljitLir.h".}: int32
+  SLJIT_R2* {.importc: "SLJIT_R2", header: "sljitLir.h".}: int32
+  SLJIT_R3* {.importc: "SLJIT_R3", header: "sljitLir.h".}: int32
+  SLJIT_R4* {.importc: "SLJIT_R4", header: "sljitLir.h".}: int32
+  SLJIT_R5* {.importc: "SLJIT_R5", header: "sljitLir.h".}: int32
+  SLJIT_R6* {.importc: "SLJIT_R6", header: "sljitLir.h".}: int32
+  SLJIT_R7* {.importc: "SLJIT_R7", header: "sljitLir.h".}: int32
 
-  SLJIT_S0* = int32(13)
-  SLJIT_S1* = int32(12)
-  SLJIT_S2* = int32(11)
-  SLJIT_S3* = int32(10)
+  SLJIT_S0* {.importc: "SLJIT_S0", header: "sljitLir.h".}: int32
+  SLJIT_S1* {.importc: "SLJIT_S1", header: "sljitLir.h".}: int32
+  SLJIT_S2* {.importc: "SLJIT_S2", header: "sljitLir.h".}: int32
+  SLJIT_S3* {.importc: "SLJIT_S3", header: "sljitLir.h".}: int32
+  SLJIT_S4* {.importc: "SLJIT_S4", header: "sljitLir.h".}: int32
+  SLJIT_S5* {.importc: "SLJIT_S5", header: "sljitLir.h".}: int32
 
-  SLJIT_SP* = int32(14) # SLJIT_NUMBER_OF_REGISTERS (13) + 1
-  SLJIT_RETURN_REG* = SLJIT_R0
+  SLJIT_SP* {.importc: "SLJIT_SP", header: "sljitLir.h".}: int32
+  SLJIT_RETURN_REG* {.importc: "SLJIT_RETURN_REG", header: "sljitLir.h".}: int32
 
-  SLJIT_FR0* = int32(1)
-  SLJIT_FR1* = int32(2)
-  SLJIT_FR2* = int32(3)
-  SLJIT_FR3* = int32(4)
-  SLJIT_RETURN_FREG* = SLJIT_FR0
+  SLJIT_FR0* {.importc: "SLJIT_FR0", header: "sljitLir.h".}: int32
+  SLJIT_FR1* {.importc: "SLJIT_FR1", header: "sljitLir.h".}: int32
+  SLJIT_FR2* {.importc: "SLJIT_FR2", header: "sljitLir.h".}: int32
+  SLJIT_FR3* {.importc: "SLJIT_FR3", header: "sljitLir.h".}: int32
+  SLJIT_FR4* {.importc: "SLJIT_FR4", header: "sljitLir.h".}: int32
+  SLJIT_FR5* {.importc: "SLJIT_FR5", header: "sljitLir.h".}: int32
+  SLJIT_FR6* {.importc: "SLJIT_FR6", header: "sljitLir.h".}: int32
+  SLJIT_FR7* {.importc: "SLJIT_FR7", header: "sljitLir.h".}: int32
+  SLJIT_RETURN_FREG* {.importc: "SLJIT_RETURN_FREG", header: "sljitLir.h".}: int32
 
 # Operand type flags and helper funcs
 const

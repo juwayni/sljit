@@ -66,13 +66,13 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
     for idx, s in stringPool:
       heapHeaders[idx] = createNimString(s)
 
-  # Perform Linear Scan Register Allocation
-  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 3, maxFloatRegs = 4)
+  # Perform Hardware-Wide Register Allocation
+  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 7, maxFloatRegs = 4)
 
   # Function Entry Prologue
   let localSize = int32(jit.regAlloc.spillStackSize + 128) # extra stack buffer for C-ABI call spilling
   let enterFlags = SLJIT_ENTER_FLOAT(4)
-  discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS0V(), 4 or enterFlags, 4, localSize)
+  discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS0V(), 6 or enterFlags, 6, localSize)
 
   for inst in instructions:
     case inst.op
@@ -311,12 +311,12 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
     if inst.src1.id > 0: vregTypes[inst.src1.id] = inst.src1.dataType
     if inst.src2.id > 0: vregTypes[inst.src2.id] = inst.src2.dataType
 
-  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 3, maxFloatRegs = 4)
+  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 7, maxFloatRegs = 4)
 
   let localSize = int32(jit.regAlloc.spillStackSize + 128)
   let enterFlags = SLJIT_ENTER_FLOAT(4)
   # OSR signature: accepts pointer vmFrame in SLJIT_R0 (SLJIT_ARG_TYPE_P_R) and returns exit PC (SLJIT_ARG_TYPE_W)
-  discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS1(SLJIT_ARG_TYPE_W, SLJIT_ARG_TYPE_P_R), 4 or enterFlags, 4, localSize)
+  discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS1(SLJIT_ARG_TYPE_W, SLJIT_ARG_TYPE_P_R), 6 or enterFlags, 6, localSize)
 
   # Save vmFrame pointer from SLJIT_R0 into stack slot vmFrameSlot
   let vmFrameSlot = jit.regAlloc.spillStackSize + 16
