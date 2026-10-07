@@ -184,6 +184,18 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
         discard sljit_emit_op1(jit.compiler, SLJIT_MOV, dst, 0, SLJIT_R0, 0)
         jit.writeBack(inst.dst, dst)
 
+    of opShl:
+      let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
+      let dst = jit.getRegOrLoad(inst.dst, SLJIT_R1)
+      discard sljit_emit_op2(jit.compiler, SLJIT_SHL, dst, 0, s1, 0, SLJIT_IMM, inst.shiftAmount)
+      jit.writeBack(inst.dst, dst)
+
+    of opAshr:
+      let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
+      let dst = jit.getRegOrLoad(inst.dst, SLJIT_R1)
+      discard sljit_emit_op2(jit.compiler, SLJIT_ASHR, dst, 0, s1, 0, SLJIT_IMM, inst.shiftAmount)
+      jit.writeBack(inst.dst, dst)
+
     of opConcatStr:
       let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
       let s2 = jit.getRegOrLoad(inst.src2, SLJIT_R1)
@@ -238,6 +250,39 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
       sljit_set_label(endJmp, endLbl)
 
       jit.writeBack(inst.dst, dst)
+
+    of opJumpCmp:
+      # Phase 6: Direct 1-instruction branch condition fusion
+      let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
+      var jmp: SljitJump
+      if isFloat:
+        let s1 = jit.getRegOrLoad(inst.src1, SLJIT_FR0)
+        let s2 = jit.getRegOrLoad(inst.src2, SLJIT_FR1)
+        var fcond: int32
+        case inst.cmpOp
+        of opCmpEq:  fcond = if inst.jumpIfZero: SLJIT_F_NOT_EQUAL else: SLJIT_F_EQUAL
+        of opCmpNeq: fcond = if inst.jumpIfZero: SLJIT_F_EQUAL else: SLJIT_F_NOT_EQUAL
+        of opCmpLt:  fcond = if inst.jumpIfZero: SLJIT_F_GREATER_EQUAL else: SLJIT_F_LESS
+        of opCmpLe:  fcond = if inst.jumpIfZero: SLJIT_F_GREATER else: SLJIT_F_LESS_EQUAL
+        of opCmpGt:  fcond = if inst.jumpIfZero: SLJIT_F_LESS_EQUAL else: SLJIT_F_GREATER
+        of opCmpGe:  fcond = if inst.jumpIfZero: SLJIT_F_LESS else: SLJIT_F_GREATER_EQUAL
+        else: fcond = SLJIT_F_EQUAL
+        jmp = sljit_emit_fcmp(jit.compiler, fcond, s1, 0, s2, 0)
+      else:
+        let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
+        let s2 = jit.getRegOrLoad(inst.src2, SLJIT_R1)
+        var icond: int32
+        case inst.cmpOp
+        of opCmpEq:  icond = if inst.jumpIfZero: SLJIT_NOT_EQUAL else: SLJIT_EQUAL
+        of opCmpNeq: icond = if inst.jumpIfZero: SLJIT_EQUAL else: SLJIT_NOT_EQUAL
+        of opCmpLt:  icond = if inst.jumpIfZero: SLJIT_SIG_GREATER_EQUAL else: SLJIT_SIG_LESS
+        of opCmpLe:  icond = if inst.jumpIfZero: SLJIT_SIG_GREATER else: SLJIT_SIG_LESS_EQUAL
+        of opCmpGt:  icond = if inst.jumpIfZero: SLJIT_SIG_LESS_EQUAL else: SLJIT_SIG_GREATER
+        of opCmpGe:  icond = if inst.jumpIfZero: SLJIT_SIG_LESS else: SLJIT_SIG_GREATER_EQUAL
+        else: icond = SLJIT_EQUAL
+        jmp = sljit_emit_cmp(jit.compiler, icond, s1, 0, s2, 0)
+
+      jit.jumpsToResolve.add((jump: jmp, targetLabelIdx: inst.labelIdx))
 
     of opJump:
       let jmp = sljit_emit_jump(jit.compiler, SLJIT_JUMP_TYPE)
@@ -468,6 +513,18 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
         discard sljit_emit_op1(jit.compiler, SLJIT_MOV, dst, 0, SLJIT_R0, 0)
         jit.writeBack(inst.dst, dst)
 
+    of opShl:
+      let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
+      let dst = jit.getRegOrLoad(inst.dst, SLJIT_R1)
+      discard sljit_emit_op2(jit.compiler, SLJIT_SHL, dst, 0, s1, 0, SLJIT_IMM, inst.shiftAmount)
+      jit.writeBack(inst.dst, dst)
+
+    of opAshr:
+      let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
+      let dst = jit.getRegOrLoad(inst.dst, SLJIT_R1)
+      discard sljit_emit_op2(jit.compiler, SLJIT_ASHR, dst, 0, s1, 0, SLJIT_IMM, inst.shiftAmount)
+      jit.writeBack(inst.dst, dst)
+
     of opConcatStr:
       let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
       let s2 = jit.getRegOrLoad(inst.src2, SLJIT_R1)
@@ -522,6 +579,39 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
       sljit_set_label(endJmp, endLbl)
 
       jit.writeBack(inst.dst, dst)
+
+    of opJumpCmp:
+      # Phase 6: Direct 1-instruction branch condition fusion
+      let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
+      var jmp: SljitJump
+      if isFloat:
+        let s1 = jit.getRegOrLoad(inst.src1, SLJIT_FR0)
+        let s2 = jit.getRegOrLoad(inst.src2, SLJIT_FR1)
+        var fcond: int32
+        case inst.cmpOp
+        of opCmpEq:  fcond = if inst.jumpIfZero: SLJIT_F_NOT_EQUAL else: SLJIT_F_EQUAL
+        of opCmpNeq: fcond = if inst.jumpIfZero: SLJIT_F_EQUAL else: SLJIT_F_NOT_EQUAL
+        of opCmpLt:  fcond = if inst.jumpIfZero: SLJIT_F_GREATER_EQUAL else: SLJIT_F_LESS
+        of opCmpLe:  fcond = if inst.jumpIfZero: SLJIT_F_GREATER else: SLJIT_F_LESS_EQUAL
+        of opCmpGt:  fcond = if inst.jumpIfZero: SLJIT_F_LESS_EQUAL else: SLJIT_F_GREATER
+        of opCmpGe:  fcond = if inst.jumpIfZero: SLJIT_F_LESS else: SLJIT_F_GREATER_EQUAL
+        else: fcond = SLJIT_F_EQUAL
+        jmp = sljit_emit_fcmp(jit.compiler, fcond, s1, 0, s2, 0)
+      else:
+        let s1 = jit.getRegOrLoad(inst.src1, SLJIT_R0)
+        let s2 = jit.getRegOrLoad(inst.src2, SLJIT_R1)
+        var icond: int32
+        case inst.cmpOp
+        of opCmpEq:  icond = if inst.jumpIfZero: SLJIT_NOT_EQUAL else: SLJIT_EQUAL
+        of opCmpNeq: icond = if inst.jumpIfZero: SLJIT_EQUAL else: SLJIT_NOT_EQUAL
+        of opCmpLt:  icond = if inst.jumpIfZero: SLJIT_SIG_GREATER_EQUAL else: SLJIT_SIG_LESS
+        of opCmpLe:  icond = if inst.jumpIfZero: SLJIT_SIG_GREATER else: SLJIT_SIG_LESS_EQUAL
+        of opCmpGt:  icond = if inst.jumpIfZero: SLJIT_SIG_LESS_EQUAL else: SLJIT_SIG_GREATER
+        of opCmpGe:  icond = if inst.jumpIfZero: SLJIT_SIG_LESS else: SLJIT_SIG_GREATER_EQUAL
+        else: icond = SLJIT_EQUAL
+        jmp = sljit_emit_cmp(jit.compiler, icond, s1, 0, s2, 0)
+
+      jit.jumpsToResolve.add((jump: jmp, targetLabelIdx: inst.labelIdx))
 
     of opJump:
       let jmp = sljit_emit_jump(jit.compiler, SLJIT_JUMP_TYPE)

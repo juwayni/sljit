@@ -1,4 +1,4 @@
-import std/tables
+import std/[tables, math]
 import ir, ast
 
 type
@@ -38,7 +38,7 @@ proc buildCFG*(insts: seq[IRInstruction]): ControlFlowGraph =
       currentBlock.instructions.add(inst)
       blockMap[inst.labelIdx] = currentBlock
 
-    of opJump, opJumpIfZero, opJumpIfNotZero, opJumpBack:
+    of opJump, opJumpIfZero, opJumpIfNotZero, opJumpCmp, opJumpBack:
       currentBlock.instructions.add(inst)
       let newBlock = BasicBlock(id: blockCounter, instructions: @[], successors: @[], predecessors: @[])
       inc blockCounter
@@ -114,18 +114,99 @@ proc constantFoldPass*(insts: seq[IRInstruction]): seq[IRInstruction] =
 
   return resultInsts
 
+proc isPowerOfTwo(n: int64): bool =
+  return n > 0 and (n and (n - 1)) == 0
+
+proc log2Int(n: int64): int =
+  var val = n
+  var shift = 0
+  while val > 1:
+    val = val div 2
+    inc shift
+  return shift
+
+proc strengthReducePass*(insts: seq[IRInstruction]): seq[IRInstruction] =
+  # Phase 6: Replace mul/div by constant 2^k with bit shift opShl / opAshr
+  var resultInsts: seq[IRInstruction] = @[]
+  var intConsts = initTable[int, int64]()
+
+  for inst in insts:
+    var replaced = false
+    case inst.op
+    of opLoadIntConst:
+      intConsts[inst.dst.id] = inst.intImm
+
+    of opMul:
+      if inst.dst.dataType == dtInt64:
+        if intConsts.hasKey(inst.src2.id) and isPowerOfTwo(intConsts[inst.src2.id]):
+          let k = log2Int(intConsts[inst.src2.id])
+          resultInsts.add(IRInstruction(op: opShl, dst: inst.dst, src1: inst.src1, shiftAmount: k))
+          replaced = true
+        elif intConsts.hasKey(inst.src1.id) and isPowerOfTwo(intConsts[inst.src1.id]):
+          let k = log2Int(intConsts[inst.src1.id])
+          resultInsts.add(IRInstruction(op: opShl, dst: inst.dst, src1: inst.src2, shiftAmount: k))
+          replaced = true
+
+    of opDiv:
+      if inst.dst.dataType == dtInt64:
+        if intConsts.hasKey(inst.src2.id) and isPowerOfTwo(intConsts[inst.src2.id]):
+          let k = log2Int(intConsts[inst.src2.id])
+          resultInsts.add(IRInstruction(op: opAshr, dst: inst.dst, src1: inst.src1, shiftAmount: k))
+          replaced = true
+
+    else:
+      discard
+
+    if not replaced:
+      if inst.dst.id > 0 and inst.op notin {opLoadIntConst}:
+        intConsts.del(inst.dst.id)
+      resultInsts.add(inst)
+
+  return resultInsts
+
+proc branchFusionPass*(insts: seq[IRInstruction]): seq[IRInstruction] =
+  # Phase 6: Fuse cmp (opCmpEq..opCmpGe) + jump (opJumpIfZero / opJumpIfNotZero) -> opJumpCmp
+  var resultInsts: seq[IRInstruction] = @[]
+  var i = 0
+
+  while i < insts.len:
+    if i + 1 < insts.len and
+       insts[i].op in {opCmpEq, opCmpNeq, opCmpLt, opCmpLe, opCmpGt, opCmpGe} and
+       insts[i + 1].op in {opJumpIfZero, opJumpIfNotZero} and
+       insts[i].dst.id == insts[i + 1].src1.id:
+
+      let cmpInst = insts[i]
+      let jumpInst = insts[i + 1]
+
+      let isJumpIfZero = (jumpInst.op == opJumpIfZero)
+
+      resultInsts.add(IRInstruction(
+        op: opJumpCmp,
+        src1: cmpInst.src1,
+        src2: cmpInst.src2,
+        cmpOp: cmpInst.op,
+        jumpIfZero: isJumpIfZero,
+        labelIdx: jumpInst.labelIdx
+      ))
+      i += 2
+    else:
+      resultInsts.add(insts[i])
+      inc i
+
+  return resultInsts
+
 proc csePass*(insts: seq[IRInstruction]): seq[IRInstruction] =
   var resultInsts: seq[IRInstruction] = @[]
   var exprTable = initTable[tuple[op: IROpCode, s1: int, s2: int], VirtualReg]()
 
   for inst in insts:
     # Reset CSE expression table at control flow boundaries
-    if inst.op in {opLabel, opJump, opJumpIfZero, opJumpIfNotZero, opJumpBack, opProcEntry, opProcExit, opCall}:
+    if inst.op in {opLabel, opJump, opJumpIfZero, opJumpIfNotZero, opJumpCmp, opJumpBack, opProcEntry, opProcExit, opCall}:
       exprTable.clear()
 
     var eliminated = false
     case inst.op
-    of opAdd, opSub, opMul, opDiv:
+    of opAdd, opSub, opMul, opDiv, opShl, opAshr:
       let key = (op: inst.op, s1: inst.src1.id, s2: inst.src2.id)
       if exprTable.hasKey(key):
         let existingVReg = exprTable[key]
@@ -185,7 +266,7 @@ proc licmPass*(insts: seq[IRInstruction]): seq[IRInstruction] =
   for i in loopStartIdx..loopEndIdx:
     let inst = insts[i]
     var isInvariant = false
-    if inst.op in {opAdd, opSub, opMul} and inst.dst.id > 0:
+    if inst.op in {opAdd, opSub, opMul, opShl, opAshr} and inst.dst.id > 0:
       let s1Invariant = inst.src1.id notin definedInLoop
       let s2Invariant = inst.src2.id notin definedInLoop
       if s1Invariant and s2Invariant:
@@ -204,6 +285,8 @@ proc licmPass*(insts: seq[IRInstruction]): seq[IRInstruction] =
 proc optimizeIR*(insts: seq[IRInstruction]): seq[IRInstruction] =
   var optimized = insts
   optimized = constantFoldPass(optimized)
+  optimized = strengthReducePass(optimized)
+  optimized = branchFusionPass(optimized)
   optimized = csePass(optimized)
   optimized = licmPass(optimized)
   return optimized

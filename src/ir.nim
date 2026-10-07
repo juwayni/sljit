@@ -18,6 +18,8 @@ type
     opSub,
     opMul,
     opDiv,
+    opShl,
+    opAshr,
     opConcatStr,
     opCmpEq,
     opCmpNeq,
@@ -28,6 +30,7 @@ type
     opJump,
     opJumpIfZero,
     opJumpIfNotZero,
+    opJumpCmp,
     opJumpBack,
     opLabel,
     opPrint,
@@ -48,6 +51,9 @@ type
     varName*: string
     labelIdx*: int
     loopId*: int
+    cmpOp*: IROpcode      # For fused comparison jump opJumpCmp (opCmpEq..opCmpGe)
+    jumpIfZero*: bool     # true for jump if condition false, false for jump if condition true
+    shiftAmount*: int     # For opShl / opAshr
     procName*: string
     args*: seq[VirtualReg]
     printType*: DataType

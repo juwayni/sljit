@@ -138,6 +138,12 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
         let divVal = vm.registers[s2].asInt
         vm.registers[dst].asInt = if divVal != 0: vm.registers[s1].asInt div divVal else: 0
 
+    of opShl:
+      vm.registers[dst].asInt = vm.registers[s1].asInt shl inst.shiftAmount
+
+    of opAshr:
+      vm.registers[dst].asInt = vm.registers[s1].asInt shr inst.shiftAmount
+
     of opConcatStr:
       let str1Ptr = cast[ptr NimStringHeader](vm.registers[s1].asPtr)
       let str2Ptr = cast[ptr NimStringHeader](vm.registers[s2].asPtr)
@@ -173,6 +179,37 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
       let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
       let cond = if isFloat: (vm.registers[s1].asFloat >= vm.registers[s2].asFloat) else: (vm.registers[s1].asInt >= vm.registers[s2].asInt)
       vm.registers[dst].asInt = if cond: 1'i64 else: 0'i64
+
+    of opJumpCmp:
+      let isFloat = (inst.src1.dataType == dtFloat64 or inst.src2.dataType == dtFloat64)
+      var cond = false
+      if isFloat:
+        let v1 = vm.registers[s1].asFloat
+        let v2 = vm.registers[s2].asFloat
+        case inst.cmpOp
+        of opCmpEq: cond = (v1 == v2)
+        of opCmpNeq: cond = (v1 != v2)
+        of opCmpLt: cond = (v1 < v2)
+        of opCmpLe: cond = (v1 <= v2)
+        of opCmpGt: cond = (v1 > v2)
+        of opCmpGe: cond = (v1 >= v2)
+        else: discard
+      else:
+        let v1 = vm.registers[s1].asInt
+        let v2 = vm.registers[s2].asInt
+        case inst.cmpOp
+        of opCmpEq: cond = (v1 == v2)
+        of opCmpNeq: cond = (v1 != v2)
+        of opCmpLt: cond = (v1 < v2)
+        of opCmpLe: cond = (v1 <= v2)
+        of opCmpGt: cond = (v1 > v2)
+        of opCmpGe: cond = (v1 >= v2)
+        else: discard
+
+      let takeJump = if inst.jumpIfZero: not cond else: cond
+      if takeJump:
+        pc = findLabelPos(instructions, inst.labelIdx)
+        continue
 
     of opJump:
       pc = findLabelPos(instructions, inst.labelIdx)
