@@ -1,5 +1,5 @@
 import std/os
-import sljit_bindings, lexer, parser, typechecker, ir, vm, codegen
+import sljit_bindings, lexer, parser, typechecker, ir, optimizer, vm, codegen
 
 proc runCode*(code: string, hotThreshold = 10, forceJit = false) =
   echo "=================================================="
@@ -16,21 +16,22 @@ proc runCode*(code: string, hotThreshold = 10, forceJit = false) =
   tc.checkStmt(astTree)
   echo "Static string pool size: ", tc.stringPool.len
 
-  echo "--- IR Lowering ---"
+  echo "--- IR Lowering & SSA Middle-End Optimization ---"
   var irB = initIRBuilder()
   irB.lowerStmt(astTree)
-  echo "Generated ", irB.instructions.len, " bytecode IR instructions."
+  let optInstructions = optimizeIR(irB.instructions)
+  echo "Generated ", irB.instructions.len, " raw IR insts -> ", optInstructions.len, " SSA-optimized IR insts."
 
   if forceJit:
     echo "--- Direct SLJIT Native Compilation & Execution ---"
-    let codePtr = compileToNative(irB.instructions, tc.stringPool)
+    let codePtr = compileToNative(optInstructions, tc.stringPool)
     type NativeProc = proc() {.cdecl.}
     let fn = cast[NativeProc](codePtr)
     fn()
   else:
     echo "--- Tiered VM Execution (Interpreter -> Hot Loop OSR JIT) ---"
     var vmCtx = initVMContext(tc.stringPool, hotThreshold = hotThreshold, jitCallback = compileToNative)
-    discard vmCtx.executeInterpreter(irB.instructions)
+    discard vmCtx.executeInterpreter(optInstructions)
   echo "=================================================="
 
 when isMainModule:
@@ -42,11 +43,12 @@ when isMainModule:
     let sampleProgram = """
 var sum: int64 = 0
 for i in 1..25:
-  sum = sum + i
+  var inv: int64 = 10 * 2
+  sum = sum + i + inv
 print sum
 
 var greeting: string = "Language Engine: "
-var target: string = "Statically Typed + SLJIT JIT!"
+var target: string = "Statically Typed + SSA Optimizer + SLJIT JIT!"
 var msg: string = greeting + target
 print msg
 """
