@@ -1,2 +1,5 @@
 bin
 taring
+src/main
+tests/test_compiler
+test_*
