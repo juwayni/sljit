@@ -67,7 +67,7 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
       heapHeaders[idx] = createNimString(s)
 
   # Perform Linear Scan Register Allocation
-  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 4, maxFloatRegs = 4)
+  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 3, maxFloatRegs = 4)
 
   # Function Entry Prologue
   let localSize = int32(jit.regAlloc.spillStackSize + 128) # extra stack buffer for C-ABI call spilling
@@ -293,7 +293,7 @@ proc compileToNative*(instructions: seq[IRInstruction], stringPool: seq[string])
   result = sljit_generate_code(jit.compiler, 0, nil)
   sljit_free_compiler(jit.compiler)
 
-proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[string], targetLoopId: int, vmRegisters: ptr UncheckedArray[VMValue], maxRegs = 1024): pointer =
+proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[string], targetLoopId: int, maxRegs = 1024): pointer =
   var jit = initJitCompiler()
   jit.compiler = sljit_create_compiler(nil)
   if jit.compiler == nil:
@@ -305,31 +305,41 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
     for idx, s in stringPool:
       heapHeaders[idx] = createNimString(s)
 
-  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 4, maxFloatRegs = 4)
+  jit.regAlloc = allocateRegisters(instructions, maxIntRegs = 3, maxFloatRegs = 4)
 
   let localSize = int32(jit.regAlloc.spillStackSize + 128)
   let enterFlags = SLJIT_ENTER_FLOAT(4)
-  discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS0V(), 4 or enterFlags, 4, localSize)
+  # OSR signature: accepts pointer vmFrame in SLJIT_R0 (SLJIT_ARG_TYPE_P_R) and returns exit PC (SLJIT_ARG_TYPE_W)
+  discard sljit_emit_enter(jit.compiler, 0, SLJIT_ARGS1(SLJIT_ARG_TYPE_W, SLJIT_ARG_TYPE_P_R), 4 or enterFlags, 4, localSize)
 
-  # Populate OSR JIT stack frame with active live VM values from flat registers array
-  if vmRegisters != nil:
-    for vregId in 1..<maxRegs:
-      if jit.regAlloc.locations.hasKey(vregId):
-        let vval = vmRegisters[vregId]
-        let vreg = VirtualReg(id: vregId, dataType: dtInt64)
-        discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, vval.asInt)
-        jit.writeBack(vreg, SLJIT_R0)
+  # Save vmFrame pointer from SLJIT_R0 to stack slot vmFrameSlot
+  let vmFrameSlot = jit.regAlloc.spillStackSize + 16
+  discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), vmFrameSlot, SLJIT_R0, 0)
 
-  # Find OSR target label for targetLoopId
+  # Find OSR target label for targetLoopId and loop end label
   var targetLabelIdx = -1
+  var endLabelIdx = -1
   for idx, inst in instructions:
     if inst.op == opJumpBack and inst.loopId == targetLoopId:
       targetLabelIdx = inst.labelIdx
+      if idx + 1 < instructions.len and instructions[idx + 1].op == opLabel:
+        endLabelIdx = instructions[idx + 1].labelIdx
       break
+
+  # Prologue: Read live-in virtual variables from vmFrame (SLJIT_MEM1(SLJIT_SP), vmFrameSlot)
+  for vregId in 1..<maxRegs:
+    if jit.regAlloc.locations.hasKey(vregId):
+      let vreg = VirtualReg(id: vregId, dataType: dtInt64)
+      let offset = vregId * sizeof(VMValue)
+      discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), vmFrameSlot)
+      discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), offset)
+      jit.writeBack(vreg, SLJIT_R1)
 
   if targetLabelIdx > 0:
     let osrJmp = sljit_emit_jump(jit.compiler, SLJIT_JUMP_TYPE)
     jit.jumpsToResolve.add((jump: osrJmp, targetLabelIdx: targetLabelIdx))
+
+  var inOSRNextBlock = false
 
   for inst in instructions:
     case inst.op
@@ -352,6 +362,10 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
     of opLabel:
       let lbl = sljit_emit_label(jit.compiler)
       jit.labels[inst.labelIdx] = lbl
+
+      # If reached endLabelIdx after loop, jump to OSR epilogue
+      if inst.labelIdx == endLabelIdx and endLabelIdx > 0:
+        inOSRNextBlock = true
 
     of opLoadIntConst:
       let dstReg = jit.getRegOrLoad(inst.dst, SLJIT_R0)
@@ -513,6 +527,8 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
     of opJumpBack:
       let jmp = sljit_emit_jump(jit.compiler, SLJIT_JUMP_TYPE)
       jit.jumpsToResolve.add((jump: jmp, targetLabelIdx: inst.labelIdx))
+      if inOSRNextBlock:
+        break # Exit loop compilation at the end of the OSR loop
 
     of opPrint:
       case inst.printType
@@ -537,7 +553,18 @@ proc compileOSRToNative*(instructions: seq[IRInstruction], stringPool: seq[strin
         discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_RETURN_REG, 0, retReg, 0)
       discard sljit_emit_return(jit.compiler, SLJIT_MOV, SLJIT_RETURN_REG, 0)
 
-  discard sljit_emit_return_void(jit.compiler)
+  # Epilogue: Load vmFrame pointer from vmFrameSlot into SLJIT_R0, then flush live-out registers
+  discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), vmFrameSlot)
+  for vregId in 1..<maxRegs:
+    if jit.regAlloc.locations.hasKey(vregId):
+      let vreg = VirtualReg(id: vregId, dataType: dtInt64)
+      let valReg = jit.getRegOrLoad(vreg, SLJIT_R1)
+      let offset = vregId * sizeof(VMValue)
+      discard sljit_emit_op1(jit.compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), offset, valReg, 0)
+
+  # Return exit interpreter label PC index
+  let exitPC = if endLabelIdx > 0: endLabelIdx else: 0
+  discard sljit_emit_return(jit.compiler, SLJIT_MOV, SLJIT_IMM, exitPC)
 
   for item in jit.jumpsToResolve:
     if jit.labels.hasKey(item.targetLabelIdx):

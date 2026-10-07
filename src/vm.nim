@@ -195,16 +195,21 @@ proc executeInterpreter*(vm: var VMContext, instructions: seq[IRInstruction]): i
 
       if currentCount >= vm.hotThreshold:
         if not vm.jitCompiledCode.hasKey(loopId):
-          echo "[VM Tier 4 Hot Loop Detector] Loop #", loopId, " reached threshold (", currentCount, " iterations). Triggering True OSR JIT Compilation!"
-          let codePtr = compileOSRToNative(instructions, vm.stringPool, loopId, vm.registers, vm.maxRegs)
+          echo "[VM Tier 4 Hot Loop Detector] Loop #", loopId, " reached threshold (", currentCount, " iterations). Triggering Phase 3 True OSR JIT Compilation!"
+          let codePtr = compileOSRToNative(instructions, vm.stringPool, loopId, vm.maxRegs)
           vm.jitCompiledCode[loopId] = codePtr
 
         if vm.jitCompiledCode[loopId] != nil:
-          type NativeOSRProc = proc() {.cdecl.}
-          let nativeFn = cast[NativeOSRProc](vm.jitCompiledCode[loopId])
-          echo "[VM Tier 4 True OSR] Transferring active live VM register frame directly into SLJIT Native Loop Execution!"
-          nativeFn()
-          return 0
+          type OSREntryProc = proc(vmFrame: ptr UncheckedArray[VMValue]): int {.cdecl.}
+          let nativeOSR = cast[OSREntryProc](vm.jitCompiledCode[loopId])
+          echo "[VM Tier 4 True OSR] Transferring VM register frame -> Hardware registers, jumping directly into native loop!"
+          let exitLabelIdx = nativeOSR(vm.registers)
+          echo "[VM Tier 4 True OSR] Loop completed natively. Written back hardware registers -> VM frame. Resuming VM at label ", exitLabelIdx
+          if exitLabelIdx > 0:
+            pc = findLabelPos(instructions, exitLabelIdx)
+            continue
+          else:
+            return 0
 
       pc = findLabelPos(instructions, inst.labelIdx)
       continue
